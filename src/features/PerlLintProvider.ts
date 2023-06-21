@@ -1,5 +1,3 @@
-"use strict";
-
 import * as cp from "child_process";
 import * as vscode from "vscode";
 import * as fs from "fs";
@@ -16,6 +14,7 @@ export default class PerlLintProvider {
 
   public activate(subscriptions: vscode.Disposable[]) {
     this.diagnosticCollection = vscode.languages.createDiagnosticCollection();
+
     vscode.workspace.onDidCloseTextDocument(
       textDocument => {
         this.diagnosticCollection.delete(textDocument.uri);
@@ -58,34 +57,50 @@ export default class PerlLintProvider {
     if (!this.configuration.enabled) {
       return;
     }
-    let decoded = "";
+
     this.tempfilepath =
       this.getTemporaryPath() +
       path.sep +
       path.basename(this.document.fileName) +
       ".lint";
-    fs.writeFile(this.tempfilepath, this.document.getText(), () => {
-      let proc = cp.spawn(
-        this.configuration.exec,
-        this.getCommandArguments(),
-        this.getCommandOptions()
-      );
-      proc.stdout.on("data", (data: Buffer) => {
-        decoded += data;
-      });
 
-      proc.stderr.on("data", (data: Buffer) => {
-        console.log(`stderr: ${data}`);
-      });
+    let decoded = "";
 
-      proc.stdout.on("end", () => {
-        this.diagnosticCollection.set(
-          this.document.uri,
-          this.getDiagnostics(decoded)
-        );
-        fs.unlink(this.tempfilepath, () => {});
+    fs.writeFile(
+      this.tempfilepath,
+      this.document.getText(),
+      () => {
+        try {
+          const proc = cp.spawn(
+            this.configuration.exec,
+            this.getCommandArguments(),
+            this.getCommandOptions()
+          );
+
+          proc.stdout.on("data", (data: Buffer) => {
+            decoded += data;
+          });
+
+          proc.stderr.on("data", (data: Buffer) => {
+            console.log(`failed to lint: ${data}`);
+          });
+
+          proc.stdout.on("end", () => {
+            this.diagnosticCollection.set(
+              this.document.uri,
+              this.getDiagnostics(decoded)
+            );
+
+            fs.unlink(this.tempfilepath, err => {
+              if (err) {
+                console.log(`Couldn't delete temporary file: ${err.message}`);
+              }
+            });
+          });
+        } catch (e) {
+          console.log(`child process error: ${e}`);
+        }
       });
-    });
   }
 
   private getWorkspaceRoot(): string {
@@ -99,6 +114,7 @@ export default class PerlLintProvider {
     if (vscode.workspace.workspaceFolders) {
       if (this.document) {
         const workspaceFolder = vscode.workspace.getWorkspaceFolder(this.document.uri);
+
         if (workspaceFolder) {
           return workspaceFolder.uri.fsPath;
         }
@@ -110,23 +126,32 @@ export default class PerlLintProvider {
   }
 
   private getDiagnostics(output) {
-    let diagnostics: vscode.Diagnostic[] = [];
+    const diagnostics: vscode.Diagnostic[] = [];
+
     output.split("\n").forEach(violation => {
       if (this.isValidViolation(violation)) {
         diagnostics.push(this.createDiagnostic(violation));
       }
     });
+
     return diagnostics;
   }
 
   private createDiagnostic(violation) {
-    let tokens = violation.replace("~||~", "").split("~|~");
+    const tokens = violation.replace("~||~", "").split("~|~");
 
-    return new vscode.Diagnostic(
+    const diagnostic = new vscode.Diagnostic(
       this.getRange(tokens),
       this.getMessage(tokens),
       this.getSeverity(tokens)
     );
+
+    diagnostic.source = this.getPolicyName(tokens);
+    return diagnostic;
+  }
+
+  private getPolicyName(tokens) {
+    return tokens[5];
   }
 
   private getRange(tokens) {
@@ -187,9 +212,11 @@ export default class PerlLintProvider {
   }
 
   private getCommandOptions() {
+    const path = this.configuration.get("path");
     return {
       shell: true,
-      cwd: this.configuration.path
+      cwd: path[0] || this.getWorkspaceRoot(),
+      env: process.env
     };
   }
 
@@ -205,32 +232,37 @@ export default class PerlLintProvider {
   }
 
   private getExcludedPolicies(): string[] {
-    let policies = [];
+    const policies = [];
+
     this.configuration.excludedPolicies.forEach(policy => {
       policies.push("--exclude");
       policies.push(policy);
     });
+
     return policies;
   }
 
   private getTemporaryPath() {
-    let configuration = vscode.workspace.getConfiguration("perl-toolbox");
+    const configuration = vscode.workspace.getConfiguration("perl-toolbox");
+
     if (configuration.temporaryPath === null) {
       return os.tmpdir();
     }
+
     return configuration.temporaryPath;
   }
 
   private useProfile(): string[] {
     if (!this.configuration.useProfile) {
       return ["--noprofile"];
+    }
+
+    if (this.configuration.perlcriticProfile) {
+      const profile: string = this.configuration.perlcriticProfile.replace(/\${workspaceRoot}|\$workspaceRoot/g, this.getWorkspaceRoot());
+
+      return ["--profile", profile];
     } else {
-      if (this.configuration.perlcriticProfile) {
-        var profile: string = this.configuration.perlcriticProfile.replace(/\$workspaceRoot/g, this.getWorkspaceRoot());
-        return ["--profile", profile];
-      } else {
-        return [];
-      }
+      return [];
     }
   }
 

@@ -1,10 +1,9 @@
-"use strict";
-
 import * as cp from "child_process";
 import * as vscode from "vscode";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+
 export default class PerlSyntaxProvider {
   private diagnosticCollection: vscode.DiagnosticCollection;
   private command: vscode.Disposable;
@@ -15,6 +14,7 @@ export default class PerlSyntaxProvider {
 
   public activate(subscriptions: vscode.Disposable[]) {
     this.diagnosticCollection = vscode.languages.createDiagnosticCollection();
+
     vscode.workspace.onDidCloseTextDocument(
       textDocument => {
         this.diagnosticCollection.delete(textDocument.uri);
@@ -59,31 +59,44 @@ export default class PerlSyntaxProvider {
     if (!this.configuration.enabled) {
       return;
     }
-    let decoded = "";
 
     this.tempfilepath =
       this.getTemporaryPath() +
       path.sep +
       path.basename(this.document.fileName) +
       ".syntax";
+
+    let decoded = "";
+
     fs.writeFile(this.tempfilepath, this.document.getText(), () => {
-      let proc = cp.spawn(
-        this.configuration.exec,
-        [this.getIncludePaths(), "-c", this.tempfilepath],
-        this.getCommandOptions()
-      );
-
-      proc.stderr.on("data", (data: Buffer) => {
-        decoded += data;
-      });
-
-      proc.stdout.on("end", () => {
-        this.diagnosticCollection.set(
-          this.document.uri,
-          this.getDiagnostics(decoded)
+      try {
+        const proc = cp.spawn(
+          this.configuration.exec,
+          [this.getIncludePaths(), "-c", this.tempfilepath],
+          this.getCommandOptions()
         );
-        fs.unlink(this.tempfilepath, () => {});
-      });
+
+
+        proc.stderr.on("data", (data: Buffer) => {
+          console.info(`decoded chunk: ${data}`);
+          decoded += data;
+        });
+
+        proc.stdout.on("end", () => {
+          this.diagnosticCollection.set(
+            this.document.uri,
+            this.getDiagnostics(decoded)
+          );
+
+          fs.unlink(this.tempfilepath, err => {
+            if (err) {
+              console.log(`Couldn't delete temporary file ${err.message}`);
+            }
+          });
+        });
+      } catch (e) {
+        console.log(`child process error: ${e}`);
+      }
     });
   }
 
@@ -91,6 +104,7 @@ export default class PerlSyntaxProvider {
     if (vscode.workspace.workspaceFolders) {
       if (this.document) {
         const workspaceFolder = vscode.workspace.getWorkspaceFolder(this.document.uri);
+
         if (workspaceFolder) {
           return workspaceFolder.uri.fsPath;
         }
@@ -109,7 +123,8 @@ export default class PerlSyntaxProvider {
   }
 
   private getTemporaryPath() {
-    let configuration = vscode.workspace.getConfiguration("perl-toolbox");
+    const configuration = vscode.workspace.getConfiguration("perl-toolbox");
+
     if (configuration.temporaryPath === null) {
       return os.tmpdir();
     }
@@ -117,29 +132,35 @@ export default class PerlSyntaxProvider {
   }
 
   private getIncludePaths() {
-    let includePaths = [];
+    const includePaths = [];
+
     this.configuration.includePaths.forEach(path => {
       includePaths.push("-I");
-      path = path.replace(/\$workspaceRoot/g, this.getWorkspaceRoot());
+      path = path.replace(/\${workspaceRoot}|\$workspaceRoot/g, this.getWorkspaceRoot());
       includePaths.push(path);
     });
+
     return includePaths.join(" ");
   }
 
   private getCommandOptions() {
+    const path = this.configuration.get("path");
+
     return {
       shell: true,
-      cwd: this.configuration.path
+      cwd: path[0] || this.getWorkspaceRoot()
     };
   }
 
   private getDiagnostics(output) {
-    let diagnostics: vscode.Diagnostic[] = [];
+    const diagnostics: vscode.Diagnostic[] = [];
+
     output.split("\n").forEach(violation => {
       if (this.isValidViolation(violation)) {
         diagnostics.push(this.createDiagnostic(violation));
       }
     });
+
     return diagnostics;
   }
 
@@ -152,8 +173,9 @@ export default class PerlSyntaxProvider {
   }
 
   private getRange(violation) {
-    let patt = /line\s+(\d+)/i;
-    let line = patt.exec(violation)[1];
+    const patt = /line\s+(\d+)/i;
+    const line = patt.exec(violation)[1];
+
     return new vscode.Range(
       Number(line) - 1,
       0,
@@ -163,7 +185,7 @@ export default class PerlSyntaxProvider {
   }
 
   private isValidViolation(violation) {
-    let patt = /line\s+\d+/i;
+    const patt = /line\s+\d+/i;
     return patt.exec(violation);
   }
 }
